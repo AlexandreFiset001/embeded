@@ -6,14 +6,7 @@
 #include "lib/list.h"
 #include "lib/memb.h"
 
-#include "dev/button-sensor.h"
-
-#include "dev/leds.h"
-
 #include <stdio.h>
-#include <math.h> 
-#include <stdlib.h>
-#include <string.h>
 
 
 #define MAX_RETRANSMISSIONS 4
@@ -23,9 +16,10 @@
 PROCESS(rime_root, "rime root");
 AUTOSTART_PROCESSES(&rime_root);
 /*---------------------------------------------------------------------------*/
-static rimeaddr_t *local_addr,*send_addr,*map_addr;
+static rimeaddr_t *local_addr,*send_addr,*map_addr,*def_addr,*req_addr,*child_addr;
 static char deep = 0;
 static set = TRUE;
+void send_info(char *msg,rimeaddr_t *req_addr);
 /*---------------------------------------------------------------------------*/
 int set_new_addr(rimeaddr_t *parrent)
 {
@@ -34,8 +28,11 @@ int set_new_addr(rimeaddr_t *parrent)
   {
 	if((map_addr+i)->u8[0] == 0 && (map_addr+i)->u8[1] == 0)
 	{
-		printf("map_addr i = %d and 0 = %d , 1 = %d\n",i,(map_addr+i)->u8[0],(map_addr+i)->u8[1]);
+		if(rimeaddr_cmp(parrent,def_addr)){
+			parrent = local_addr;
+		}
 		memcpy((map_addr+i),parrent,sizeof(rimeaddr_t));
+		printf("map_addr i = %d and 0 = %d , 1 = %d\n",i,(map_addr+i)->u8[0],(map_addr+i)->u8[1]);
 		return i;
 	}
   }
@@ -82,9 +79,24 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
     /* Update existing history entry */
     e->seq = seqno;
   }
+  char *msg = (char *)packetbuf_dataptr();
 
-  printf("runicast message received from %d.%d, seqno %d\n",
-	 from->u8[0], from->u8[1], seqno);
+  printf("runicast message received from %d.%d, seqno %d, msg %0.1x.%0.1x\n",
+	 from->u8[0], from->u8[1], seqno,msg[1],msg[2]);
+
+  if(*msg == CODE_ADDR_REQ && (!(msg[1] == 1 && msg[2] ==0) || rimeaddr_cmp(from,def_addr))){
+    printf("request addr, send addr of size %d\n",sizeof(rimeaddr_t));
+    memcpy(req_addr,from,sizeof(rimeaddr_t));
+    int i = set_new_addr(from);
+    char *send;
+    send = malloc(3);
+    send[0] = CODE_ADDR_INFO;
+    send[1] = i%16;
+    send[2] = (i>>4)%16;
+    printf("request addr, send addr %d.%d\n",send[1],send[2]);
+    send_info(send,from);
+    free(send);
+  }
 }
 static void
 sent_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retransmissions)
@@ -107,29 +119,42 @@ static void
 broadcast_recv(struct broadcast_conn *c, const rimeaddr_t *from)
 {
   char *msg = (char *)packetbuf_dataptr();
-  printf("broadcast message received from %d.%d: '%0.1x'\n",from->u8[0], from->u8[1],msg);
+  printf("broadcast message received from %d.%d: '%0.1x'\n",from->u8[0], from->u8[1],*msg);
   //request for an address
-  if(*msg == CODE_ADDR_REQ){
+  if(*msg == CODE_ADDR_REQ && rimeaddr_cmp(def_addr,from)){
     printf("request addr, send addr of size %d\n",sizeof(rimeaddr_t));
-    int i = set_new_addr(local_addr);
-    send_addr->u8[0] = i%16;
-    send_addr->u8[1] = (i>>4)%16;
-    packetbuf_copyfrom(send_addr, sizeof(rimeaddr_t));
-    runicast_send(&runicast, from, MAX_RETRANSMISSIONS);
+    char *send;
+    send = malloc(2);
+    send[0] = CODE_ADDR_DEEP;
+    send[1] = deep+1;
+    send_info(send,from);
+    free(send);
   }
 }
 static const struct broadcast_callbacks broadcast_call = {broadcast_recv};
 static struct broadcast_conn broadcast;
 /*---------------------------------------------------------------------------*/
+void send_info(char *msg,rimeaddr_t *req_addr)
+{
+	packetbuf_copyfrom(msg,CODE_LENGTH+ADDR_LENGTH);
+	runicast_send(&runicast, req_addr, MAX_RETRANSMISSIONS);
+}
+/*---------------------------------------------------------------------------*/
 PROCESS_THREAD(rime_root, ev, data)
 {
 
-  static struct etimer et;
   int i;
+  static struct etimer et;
   if(set){
+	def_addr = malloc(sizeof(rimeaddr_t));
+	def_addr->u8[0] = 0;
+	def_addr->u8[1] = 0;
 	local_addr = malloc(sizeof(rimeaddr_t));
 	local_addr->u8[0] = 1;
 	local_addr->u8[1] = 0;
+	req_addr = malloc(sizeof(rimeaddr_t));
+	req_addr->u8[0] = 0;
+	req_addr->u8[1] = 0;
 	map_addr = malloc(pow(2,(RIMEADDR_SIZE*4)-1)*sizeof(rimeaddr_t));
 	map_addr[0].u8[0] = 0;
 	map_addr[0].u8[1] = 0;
@@ -139,21 +164,25 @@ PROCESS_THREAD(rime_root, ev, data)
 	{
 	memcpy((map_addr+i),map_addr,sizeof(rimeaddr_t));
 	}
+	child_addr = malloc(20*sizeof(rimeaddr_t));
+	for(i = 0 ; i < 20 ; i++)
+	{
+	memcpy((map_addr+i),map_addr,sizeof(rimeaddr_t));
+	}
         set = FALSE;
   }
+  rimeaddr_set_node_addr(local_addr);
   PROCESS_EXITHANDLER(runicast_close(&runicast);)
   PROCESS_EXITHANDLER(broadcast_close(&broadcast);)
     
   PROCESS_BEGIN();
   
-  rimeaddr_set_node_addr(local_addr);
   runicast_open(&runicast, 146, &runicast_callbacks);
   broadcast_open(&broadcast, 129, &broadcast_call);
-
+  broadcast_send(&broadcast);
   while(1) {
-    
    /* Delay 2-4 seconds */
-    etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4));
+    etimer_set(&et, CLOCK_SECOND * 2 + random_rand() % (CLOCK_SECOND * 4));
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
   }
 
