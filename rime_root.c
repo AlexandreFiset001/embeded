@@ -1,6 +1,7 @@
 #include "contiki.h"
 #include "net/rime.h"
 #include "random.h"
+#include "dev/serial-line.h"
 #include "msg_info.h" 		// informations about message structure
 
 #include "lib/list.h"
@@ -20,7 +21,8 @@
 PROCESS(rime_root, "rime root");
 PROCESS(alive,"alive process");
 PROCESS(is_alive,"check alive process");
-AUTOSTART_PROCESSES(&rime_root,&alive,&is_alive);
+PROCESS(read_serial,"read the serial input");
+AUTOSTART_PROCESSES(&rime_root,&alive,&is_alive,&read_serial);
 /*---------------------------------------------------------------------------*/
 // Definition of variables used by all processes
 //variables to manage the addresses
@@ -200,6 +202,18 @@ int find(char *child_addr,char *parent_addr)
 	return find(map_addr+(*child_addr),parent_addr);
 }
 /*---------------------------------------------------------------------------*/
+//find the child who have the target address in his subtree
+char get_path(char *target)
+{
+	printf(" target value %d at index %d\n",*(map_addr+*target),*target);
+	if(*(map_addr+*target) == local){
+		return *target;
+	}
+	else{
+		return get_path((map_addr+*target));
+	}
+}
+/*---------------------------------------------------------------------------*/
 //delet an entry in the table and all his childs
 void del_addr(char *rem_addr)
 {
@@ -323,11 +337,11 @@ void read_msg(char *type,char *msg)
 	// read message until the end of the message is reach
 	while(*(msg+i) != 0){
 		//print data on the standard output to be taken by the gate away
-		if(strcmp(type,"hum")){
-			printf("/hum/node_%d %d\n",*(msg+i),*(msg+i+1));
+		if(!strcmp(type,"hum")){
+			printf("/node_%d/hum %d\n",*(msg+i),*(msg+i+1));
 			i = i+2;
 		}else{
-			printf("/temp/node_%d %d\n",*(msg+i),*(msg+i+1));
+			printf("/node_%d/temp %d\n",*(msg+i),*(msg+i+1));
 			i = i+2;
 		}
 	}
@@ -417,6 +431,67 @@ PROCESS_THREAD(is_alive, ev, data)
 		check_child();
 	}
     
+  	PROCESS_END();
+}
+/*---------------------------------------------------------------------------*/
+//process in charge to read the serial input and translate messages into Rime messages for a node in the tree
+PROCESS_THREAD(read_serial, ev, data)
+{
+   	char *msg;
+	rimeaddr_t temp;
+	char *send;
+	char node_number;
+  	PROCESS_BEGIN();
+  
+  	while(1) {
+   		PROCESS_YIELD();
+     		if(ev == serial_line_event_message) {
+       			printf("received line: %s\n", (char *)data);
+			send = malloc(2);
+			//casting the message received
+			msg = (char *)data;
+			if(*msg == 'h'){
+				msg = msg+1;
+				if(*msg == 's'){
+					send[0] = CODE_MSG_HUM_STOP;
+				}
+				else if(*msg == 'b'){
+					send[0] = CODE_MSG_HUM_PER;
+				}
+				else if(*msg == 'c'){
+					send[0] = CODE_MSG_HUM_CH;
+				}
+			}
+			else if (*msg == 't'){
+				msg = msg+1;
+				if(*msg == 's'){
+					send[0] = CODE_MSG_TEMP_STOP;
+				}
+				else if(*msg == 'b'){
+					send[0] = CODE_MSG_TEMP_PER;
+				}
+				else if(*msg == 'c'){
+					send[0] = CODE_MSG_TEMP_CH;
+				}
+			}
+			msg = msg+2;
+			//casting the node number
+			node_number = *msg - '0';
+			msg ++;
+			int i;
+			for (i = 0; msg[i] != 0; i++){
+				printf("char %c\n",*(msg+i));
+				node_number = (node_number*10)+(*(msg+i) - '0');
+			}
+			printf("send %d\n",node_number);
+			//sending the message
+			send[1] = node_number;
+			temp.u8[0] = get_path(&node_number);
+			temp.u8[1] = 0;
+			send_info(send,&temp,CODE_LENGTH+ADDR_LENGTH);
+			free(send);
+		}
+     	}
   	PROCESS_END();
 }
 /*---------------------------------------------------------------------------*/

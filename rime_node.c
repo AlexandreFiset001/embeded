@@ -23,7 +23,7 @@ AUTOSTART_PROCESSES(&rime_node,&get_alive,&alive,&temp,&hum,&is_alive);
 /*---------------------------------------------------------------------------*/
 // Definition of variables used by all processes
 //variables to manage the addresses
-static rimeaddr_t *local_addr,*def_addr,*parent_addr,*req_addr;
+static rimeaddr_t *local_addr,*def_addr,*parent_addr,*req_addr,*parent_req_addr;
 static char deep;
 
 //variables for to manage the data
@@ -206,6 +206,18 @@ int find(char *child_addr,char *parent_addr)
 	return find(map_addr+(*child_addr),parent_addr);
 }
 /*---------------------------------------------------------------------------*/
+//find the child who have the target address in his subtree
+char get_path(char *target)
+{
+	printf(" target value %d at index %d\n",*(map_addr+*target),*target);
+	if(*(map_addr+*target) == local){
+		return *target;
+	}
+	else{
+		return get_path((map_addr+*target));
+	}
+}
+/*---------------------------------------------------------------------------*/
 //delet an entry in the table and all his childs
 void del_addr(char *rem_addr)
 {
@@ -238,6 +250,8 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
 	 from->u8[0], from->u8[1], seqno, msg[0],INFO_PENDING);
 	
 	//case for the different received code define in msg_info.h
+	rimeaddr_t *temp;
+	temp = malloc(sizeof(rimeaddr_t));
 	switch(*msg){
 		// message to forward or get the response to an address requested
 		case CODE_ADDR_INFO:
@@ -265,7 +279,7 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
 					}
 					//otherwise just add it to the routing table
 					else{
-						add_addr(&msg[1],req_addr->u8);
+						add_addr(&msg[1],parent_req_addr->u8);
 					}
 				}
 				//set the flag to allow new address to be manage
@@ -278,6 +292,9 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
 			if(!INFO_PENDING){
 				//forward the message to the parent to be handled by the root
 				send_info(msg,parent_addr,CODE_LENGTH+ADDR_LENGTH);
+				//keep track of the parent of the new child to update the routing table
+				parent_req_addr->u8[0] = msg[1];
+				parent_req_addr->u8[1] = 0;
 				//set the flag to signal that an address is already required
 				INFO_PENDING = TRUE;
 			}
@@ -315,10 +332,94 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
 		case CODE_MSG_HUM:
 			read_msg("hum",msg);
 			break;
+		//command message
+		case CODE_MSG_HUM_PER:
+			//message for this node
+			if(*(msg+1) == local_addr->u8[0]){
+				SEND_HUM = TRUE;
+			}
+			//otherwise forward it to the concerned node
+			else{
+				//find the path to the concerned node
+				temp = get_path(&msg[1]);
+				temp->u8[0] = temp;
+				temp->u8[1] = 0;
+				send_info(msg,temp,CODE_LENGTH+ADDR_LENGTH);
+			}
+		case CODE_MSG_TEMP_PER:
+			//message for this node
+			if(*(msg+1) == local_addr->u8[0]){
+				SEND_TEMP = TRUE;
+			}
+			//otherwise forward it to the concerned node
+			else{
+				//find the path to the concerned node
+				temp = get_path(&msg[1]);
+				temp->u8[0] = temp;
+				temp->u8[1] = 0;
+				send_info(msg,temp,CODE_LENGTH+ADDR_LENGTH);
+			}
+		case CODE_MSG_HUM_CH:
+			//message for this node
+			if(*(msg+1) == local_addr->u8[0]){
+				SEND_HUM = TRUE;
+				SEND_HUM_CH = TRUE;
+			}
+			//otherwise forward it to the concerned node
+			else{
+				//find the path to the concerned node
+				temp = get_path(&msg[1]);
+				temp->u8[0] = temp;
+				temp->u8[1] = 0;
+				send_info(msg,temp,CODE_LENGTH+ADDR_LENGTH);
+			}
+		case CODE_MSG_TEMP_CH:
+			//message for this node
+			if(*(msg+1) == local_addr->u8[0]){
+				SEND_TEMP = TRUE;
+				SEND_TEMP_CH = TRUE;
+			}
+			//otherwise forward it to the concerned node
+			else{
+				//find the path to the concerned node
+				temp = get_path(&msg[1]);
+				temp->u8[0] = temp;
+				temp->u8[1] = 0;
+				send_info(msg,temp,CODE_LENGTH+ADDR_LENGTH);
+			}
+		case CODE_MSG_HUM_STOP:
+			//message for this node
+			if(*(msg+1) == local_addr->u8[0]){
+				SEND_HUM = FALSE;
+				SEND_HUM_CH = FALSE;
+			}
+			//otherwise forward it to the concerned node
+			else{
+				//find the path to the concerned node
+				temp = get_path(&msg[1]);
+				temp->u8[0] = temp;
+				temp->u8[1] = 0;
+				send_info(msg,temp,CODE_LENGTH+ADDR_LENGTH);
+			}
+		case CODE_MSG_TEMP_STOP:
+			//message for this node
+			if(*(msg+1) == local_addr->u8[0]){
+				SEND_TEMP = TRUE;
+				SEND_TEMP_CH = TRUE;
+			}
+			//otherwise forward it to the concerned node
+			else{
+				//find the path to the concerned node
+				temp = get_path(&msg[1]);
+				temp->u8[0] = temp;
+				temp->u8[1] = 0;
+				send_info(msg,temp,CODE_LENGTH+ADDR_LENGTH);
+			}
 		//unknow msg
 		default:
 			break;
 	}
+	free(temp);
 }
 static void
 sent_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retransmissions)
@@ -372,7 +473,7 @@ void send(char *type)
 	//send a message of 9 data at maximum ( addr of the node which produce the data and the data him self)
 	char *msg = malloc(20*sizeof(char));
 	int i = 1;
-	if(strcmp(type,"hum")){
+	if(!strcmp(type,"hum")){
 		*msg = CODE_MSG_HUM;
 		do{
 			*(msg+i) = *(tab_hum+i_hum_cons);
@@ -391,7 +492,10 @@ void send(char *type)
 	}
 	// end of data marker
 	*(msg+i) = 0;
-	packetbuf_copyfrom(send,i*CODE_LENGTH);
+	printf("send code %d \n",*msg);
+	printf("send addr %d \n",*(msg+1));
+	printf("send data %d \n",*(msg+2));
+	packetbuf_copyfrom(msg,i*(DATA_MSG_LENGTH));
 	runicast_send(&runicast, parent_addr, MAX_RETRANSMISSIONS);
 }
 /*--------------------------------------------------------------------------*/
@@ -402,7 +506,7 @@ void read_msg(char *type,char *msg)
 	// read message until the end of the message is reach
 	while(*(msg+i) != 0){
 		//put data in the buffer
-		if(strcmp(type,"hum")){
+		if(!strcmp(type,"hum")){
 			*(tab_hum+i_hum_cons) = *(msg+i);
 			*(tab_hum+i_hum_cons+1) = *(msg+i+1);
 			i = i + 2;
@@ -430,6 +534,10 @@ PROCESS_THREAD(rime_node, ev, data)
 	 	def_addr->u8[0] = 0;
 	  	def_addr->u8[1] = 0;
 		//allocation of memory to retain the node who ask the information who is pending
+          	req_addr = malloc(sizeof(rimeaddr_t));
+	  	req_addr->u8[0] = 0;
+	  	req_addr->u8[1] = 0;
+		//allocation of memory to retain the parent of the new child
           	req_addr = malloc(sizeof(rimeaddr_t));
 	  	req_addr->u8[0] = 0;
 	  	req_addr->u8[1] = 0;
@@ -465,7 +573,7 @@ PROCESS_THREAD(rime_node, ev, data)
 	//infinite loop
   	while(1) {
    		/* Delay 5-10 seconds */
-    		etimer_set(&et, CLOCK_SECOND * 10 + random_rand() % (CLOCK_SECOND * 15));
+    		etimer_set(&et, CLOCK_SECOND * 5 + random_rand() % (CLOCK_SECOND * 10));
     		PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 		//if the node need to reset the connection with an other address
     		if(RESET_CONN){
@@ -500,10 +608,12 @@ PROCESS_THREAD(rime_node, ev, data)
 		//if the node is in the network
    		else{
 			//send data if the circular buffer is not empty
+			printf("cons %d prod %d\n",i_temp_cons,i_temp_prod);
       			if(i_temp_cons != i_temp_prod){
+				printf("send temp\n");
 				send("temp");
 	      		}
-	      		if(i_hum_cons != i_hum_prod){
+	      		else if(i_hum_cons != i_hum_prod){
 				send("hum");
       			}
       			printf("obtained addr %d.%d\n",local_addr->u8[0],local_addr->u8[1]);
@@ -668,6 +778,8 @@ PROCESS_THREAD(is_alive, ev, data)
     		etimer_set(&et, CLOCK_SECOND * 180);
     		PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 		check_child();
+		//avoid stucked node
+		INFO_PENDING = FALSE;
 	}
     
   	PROCESS_END();
